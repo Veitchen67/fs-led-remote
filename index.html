@@ -9,8 +9,9 @@
   - Connect: pairs nothing, just connects to FS-LED.
   - Shows the current LED mode (read + notifications of "Mode").
   - "Toggle LED mode" writes 0x01 to "Command" = same as pressing the button.
-  Works in Chrome on Android (secure context needed: HTTPS or localhost,
-  see CLAUDE.md for how to open it from the PC).
+  Works in Chrome on Android (secure context needed: HTTPS or localhost).
+  Publish with tools/publish_webapp.py (stamps the build time, copies the
+  page to the GitHub Pages repo, commits and pushes there).
 -->
 <style>
   :root {
@@ -53,6 +54,7 @@
     font: 0.8rem/1.4 ui-monospace, Consolas, monospace; color: var(--muted);
     max-height: 9.8em; overflow-y: auto; white-space: pre-wrap; margin: 0;
   }
+  #build { font: 0.8rem ui-monospace, Consolas, monospace; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -77,10 +79,16 @@
     <div class="label">Log</div>
     <pre id="log"></pre>
   </div>
+
+  <div id="build"></div>
 </main>
 
 <script>
   "use strict";
+
+  // Time of publishing, written by tools/publish_webapp.py (via stamp_build_time.py)
+  const BUILD_TIMESTAMP = "2026-11-25_16:24:27,512";
+  document.getElementById("build").textContent = "Build: " + BUILD_TIMESTAMP;
 
   const DEVICE_NAME       = "FS-LED";
   const SERVICE_UUID      = "92eafe23-ca6a-47a9-91af-32ab6c041b02"; // "LED Mode"
