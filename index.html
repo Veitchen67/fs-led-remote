@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FS-LED Remote</title>
+<!--
+  Web Bluetooth remote for the 261125a_FirstSteps board ("FS-LED").
+  - Connect: pairs nothing, just connects to FS-LED.
+  - Shows the current LED mode (read + notifications of "Mode").
+  - "Toggle LED mode" writes 0x01 to "Command" = same as pressing the button.
+  Works in Chrome on Android (secure context needed: HTTPS or localhost,
+  see CLAUDE.md for how to open it from the PC).
+-->
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1c1e21; --muted: #65676b;
+    --accent: #0b63ce; --accent-text: #ffffff; --ok: #1a7f37; --bad: #b42318;
+    --border: #d0d4da;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111316; --card: #1c1f24; --text: #e8eaed; --muted: #9aa0a6;
+      --accent: #4c9aff; --accent-text: #0b1220; --ok: #4ac26b; --bad: #ff6b5e;
+      --border: #343a42;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background: var(--bg); color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 420px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 1.25rem; margin: 4px 0 0; }
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px;
+  }
+  .label { color: var(--muted); font-size: 0.85rem; margin-bottom: 4px; }
+  #status { font-weight: 600; }
+  #status.ok { color: var(--ok); }
+  #status.bad { color: var(--bad); }
+  #mode { font-size: 1.4rem; font-weight: 600; min-height: 2em; }
+  button {
+    width: 100%; padding: 14px; font-size: 1rem; font-weight: 600;
+    border-radius: 10px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text);
+  }
+  button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+  button.big { padding: 28px 14px; font-size: 1.25rem; }
+  button:disabled { opacity: 0.45; }
+  #log {
+    font: 0.8rem/1.4 ui-monospace, Consolas, monospace; color: var(--muted);
+    max-height: 9.8em; overflow-y: auto; white-space: pre-wrap; margin: 0;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>FS-LED Remote</h1>
+
+  <div class="card">
+    <div class="label">Connection</div>
+    <div id="status">Not connected</div>
+  </div>
+
+  <button id="connectBtn" class="primary">Connect to FS-LED</button>
+
+  <div class="card">
+    <div class="label">Current LED mode</div>
+    <div id="mode">–</div>
+  </div>
+
+  <button id="toggleBtn" class="primary big" disabled>Toggle LED mode</button>
+
+  <div class="card">
+    <div class="label">Log</div>
+    <pre id="log"></pre>
+  </div>
+</main>
+
+<script>
+  "use strict";
+
+  const DEVICE_NAME       = "FS-LED";
+  const SERVICE_UUID      = "92eafe23-ca6a-47a9-91af-32ab6c041b02"; // "LED Mode"
+  const MODE_CHAR_UUID    = "7fbc2e37-250e-4a68-9135-f29e5111e1cb"; // read + notify
+  const COMMAND_CHAR_UUID = "b0517eeb-c3e6-41ac-b494-cd405a12f0f7"; // write
+  const CMD_TOGGLE        = 0x01;                                   // like the button
+
+  const statusEl   = document.getElementById("status");
+  const modeEl     = document.getElementById("mode");
+  const logEl      = document.getElementById("log");
+  const connectBtn = document.getElementById("connectBtn");
+  const toggleBtn  = document.getElementById("toggleBtn");
+
+  const decoder = new TextDecoder();
+  let device = null;
+  let commandChar = null;
+
+  function log(msg) {
+    const t = new Date().toLocaleTimeString();
+    logEl.textContent = `[${t}] ${msg}\n` + logEl.textContent;
+  }
+
+  function setStatus(text, cls) {
+    statusEl.textContent = text;
+    statusEl.className = cls || "";
+  }
+
+  function setConnected(connected) {
+    toggleBtn.disabled = !connected;
+    connectBtn.textContent = connected ? "Disconnect" : "Connect to FS-LED";
+    connectBtn.className = connected ? "" : "primary";
+    if (!connected) {
+      commandChar = null;
+      modeEl.textContent = "–";
+    }
+  }
+
+  function showMode(dataView) {
+    const text = decoder.decode(dataView);
+    modeEl.textContent = text;
+    return text;
+  }
+
+  async function connect() {
+    if (!navigator.bluetooth) {
+      setStatus("Web Bluetooth not available in this browser", "bad");
+      log("Use Chrome on Android (page must be HTTPS or localhost).");
+      return;
+    }
+    try {
+      setStatus("Choose FS-LED in the list ...");
+      device = await navigator.bluetooth.requestDevice({
+        filters: [{ name: DEVICE_NAME }],
+        optionalServices: [SERVICE_UUID],
+      });
+      device.addEventListener("gattserverdisconnected", () => {
+        setStatus("Disconnected", "bad");
+        log("Disconnected");
+        setConnected(false);
+      });
+
+      setStatus("Connecting ...");
+      const server  = await device.gatt.connect();
+      const service = await server.getPrimaryService(SERVICE_UUID);
+      const modeChar = await service.getCharacteristic(MODE_CHAR_UUID);
+      commandChar    = await service.getCharacteristic(COMMAND_CHAR_UUID);
+
+      log("Mode: " + showMode(await modeChar.readValue()));
+      modeChar.addEventListener("characteristicvaluechanged", (e) => {
+        log("Notification: " + showMode(e.target.value));
+      });
+      await modeChar.startNotifications();
+
+      setStatus("Connected to " + device.name, "ok");
+      log("Connected, notifications on");
+      setConnected(true);
+    } catch (err) {
+      setStatus("Not connected", "bad");
+      log("Error: " + err.message);
+      if (device && device.gatt.connected) device.gatt.disconnect();
+      setConnected(false);
+    }
+  }
+
+  connectBtn.addEventListener("click", () => {
+    if (device && device.gatt.connected) {
+      device.gatt.disconnect();   // fires gattserverdisconnected
+    } else {
+      connect();
+    }
+  });
+
+  toggleBtn.addEventListener("click", async () => {
+    if (!commandChar) return;
+    toggleBtn.disabled = true;
+    try {
+      await commandChar.writeValueWithResponse(Uint8Array.of(CMD_TOGGLE));
+      log("Toggle command sent");
+    } catch (err) {
+      log("Error: " + err.message);
+    } finally {
+      toggleBtn.disabled = !(device && device.gatt.connected);
+    }
+  });
+</script>
+</body>
+</html>
