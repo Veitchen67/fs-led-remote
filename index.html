@@ -9,6 +9,8 @@
   - Connect: pairs nothing, just connects to FS-LED.
   - Shows the current LED mode (read + notifications of "Mode").
   - "Toggle LED mode" writes 0x01 to "Command" = same as pressing the button.
+  - Blink speed: slider + number per LED (1..10 Hz), written to "Speeds"
+    (2 bytes: LED1 Hz, LED2 Hz); read from the board after connecting.
   Works in Chrome on Android (secure context needed: HTTPS or localhost).
   Publish with tools/publish_webapp.py (stamps the build time, copies the
   page to the GitHub Pages repo, commits and pushes there).
@@ -55,6 +57,16 @@
     max-height: 9.8em; overflow-y: auto; white-space: pre-wrap; margin: 0;
   }
   #build { font: 0.8rem ui-monospace, Consolas, monospace; color: var(--muted); }
+  .speed-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
+  .speed-row .led { font-weight: 600; width: 3.2em; }
+  .speed-row input[type=range] { flex: 1; accent-color: var(--accent); }
+  .speed-row input[type=number] {
+    width: 3.6em; padding: 6px; font-size: 1rem; text-align: center;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--bg); color: var(--text);
+  }
+  .speed-row input[type=number].invalid { border-color: var(--bad); }
+  .speed-row input:disabled { opacity: 0.45; }
 </style>
 </head>
 <body>
@@ -75,6 +87,28 @@
 
   <button id="toggleBtn" class="primary big" disabled>Toggle LED mode</button>
 
+  <!-- Slider + number per LED. Sent when the slider is released or the
+       number is confirmed (Enter / leaving the field). -->
+  <div class="card">
+    <div class="label">Blink speed (1–10 Hz)</div>
+    <div class="speed-row">
+      <span class="led">LED1</span>
+      <input id="speed1Range" type="range" min="1" max="10" step="1" value="1"
+             aria-label="LED1 blink speed" disabled>
+      <input id="speed1Num" type="number" min="1" max="10" step="1" value="1"
+             inputmode="numeric" aria-label="LED1 blink speed in Hz" disabled>
+      <span>Hz</span>
+    </div>
+    <div class="speed-row">
+      <span class="led">LED2</span>
+      <input id="speed2Range" type="range" min="1" max="10" step="1" value="2"
+             aria-label="LED2 blink speed" disabled>
+      <input id="speed2Num" type="number" min="1" max="10" step="1" value="2"
+             inputmode="numeric" aria-label="LED2 blink speed in Hz" disabled>
+      <span>Hz</span>
+    </div>
+  </div>
+
   <div class="card">
     <div class="label">Log</div>
     <pre id="log"></pre>
@@ -87,24 +121,38 @@
   "use strict";
 
   // Time of publishing, written by tools/publish_webapp.py (via stamp_build_time.py)
-  const BUILD_TIMESTAMP = "2026-11-25_16:24:27,512";
+  const BUILD_TIMESTAMP = "2026-11-25_16:50:24,675";
   document.getElementById("build").textContent = "Build: " + BUILD_TIMESTAMP;
 
   const DEVICE_NAME       = "FS-LED";
   const SERVICE_UUID      = "92eafe23-ca6a-47a9-91af-32ab6c041b02"; // "LED Mode"
   const MODE_CHAR_UUID    = "7fbc2e37-250e-4a68-9135-f29e5111e1cb"; // read + notify
   const COMMAND_CHAR_UUID = "b0517eeb-c3e6-41ac-b494-cd405a12f0f7"; // write
+  const SPEEDS_CHAR_UUID  = "e50fe171-5767-4750-aa19-479f39a99090"; // LED1 Hz, LED2 Hz
   const CMD_TOGGLE        = 0x01;                                   // like the button
+  const SPEED_MIN_HZ = 1, SPEED_MAX_HZ = 10;                        // as in the firmware
 
   const statusEl   = document.getElementById("status");
   const modeEl     = document.getElementById("mode");
   const logEl      = document.getElementById("log");
   const connectBtn = document.getElementById("connectBtn");
   const toggleBtn  = document.getElementById("toggleBtn");
+  const speedRanges = [document.getElementById("speed1Range"), document.getElementById("speed2Range")];
+  const speedNums   = [document.getElementById("speed1Num"),   document.getElementById("speed2Num")];
 
   const decoder = new TextDecoder();
   let device = null;
   let commandChar = null;
+  let speedsChar = null;
+
+  // Web Bluetooth allows one GATT operation at a time ("operation already in
+  // progress"), so all operations after connecting run one after another.
+  let gattQueue = Promise.resolve();
+  function gattOp(fn) {
+    const result = gattQueue.then(fn);
+    gattQueue = result.catch(() => {});     // keep the queue going after errors
+    return result;
+  }
 
   function log(msg) {
     const t = new Date().toLocaleTimeString();
@@ -118,12 +166,68 @@
 
   function setConnected(connected) {
     toggleBtn.disabled = !connected;
+    for (const el of [...speedRanges, ...speedNums]) el.disabled = !connected;
     connectBtn.textContent = connected ? "Disconnect" : "Connect to FS-LED";
     connectBtn.className = connected ? "" : "primary";
     if (!connected) {
       commandChar = null;
+      speedsChar = null;
       modeEl.textContent = "–";
     }
+  }
+
+  function showSpeeds(led1, led2) {
+    [led1, led2].forEach((hz, i) => {
+      speedRanges[i].value = hz;
+      speedNums[i].value = hz;
+      speedNums[i].classList.remove("invalid");
+    });
+  }
+
+  async function readSpeeds() {
+    const v = await gattOp(() => speedsChar.readValue());
+    const led1 = v.getUint8(0), led2 = v.getUint8(1);
+    showSpeeds(led1, led2);
+    log(`Speeds: LED1 ${led1} Hz, LED2 ${led2} Hz`);
+  }
+
+  async function sendSpeeds() {
+    if (!speedsChar) return;
+    const led1 = Number(speedRanges[0].value), led2 = Number(speedRanges[1].value);
+    try {
+      await gattOp(() => speedsChar.writeValueWithResponse(Uint8Array.of(led1, led2)));
+      log(`Speeds sent: LED1 ${led1} Hz, LED2 ${led2} Hz`);
+    } catch (err) {
+      log("Speeds rejected: " + err.message);
+      await readSpeeds().catch(() => {});   // show what the board really uses
+    }
+  }
+
+  // Slider moves the number along and sends when released ("change");
+  // the number is checked and sent when confirmed (Enter / leaving the field)
+  for (let i = 0; i < 2; i++) {
+    speedRanges[i].addEventListener("input", () => {
+      speedNums[i].value = speedRanges[i].value;
+      speedNums[i].classList.remove("invalid");
+    });
+    speedRanges[i].addEventListener("change", sendSpeeds);
+    speedNums[i].addEventListener("change", () => {
+      const hz = Number(speedNums[i].value);
+      if (!Number.isInteger(hz) || hz < SPEED_MIN_HZ || hz > SPEED_MAX_HZ) {
+        speedNums[i].classList.add("invalid");
+        log(`LED${i + 1}: please enter ${SPEED_MIN_HZ}..${SPEED_MAX_HZ} Hz`);
+        speedNums[i].value = speedRanges[i].value;    // back to the valid value
+        return;
+      }
+      speedNums[i].classList.remove("invalid");
+      if (hz !== Number(speedRanges[i].value)) {
+        speedRanges[i].value = hz;
+        sendSpeeds();
+      }
+    });
+    speedNums[i].addEventListener("keydown", (e) => {
+      if (e.key === "Enter") speedNums[i].blur();     // fires "change", closes keyboard
+    });
   }
 
   function showMode(dataView) {
@@ -155,12 +259,19 @@
       const service = await server.getPrimaryService(SERVICE_UUID);
       const modeChar = await service.getCharacteristic(MODE_CHAR_UUID);
       commandChar    = await service.getCharacteristic(COMMAND_CHAR_UUID);
+      try {
+        speedsChar   = await service.getCharacteristic(SPEEDS_CHAR_UUID);
+      } catch (err) {
+        throw new Error("board firmware has no Speeds characteristic (update the firmware)");
+      }
 
-      log("Mode: " + showMode(await modeChar.readValue()));
+      gattQueue = Promise.resolve();
+      log("Mode: " + showMode(await gattOp(() => modeChar.readValue())));
+      await readSpeeds();
       modeChar.addEventListener("characteristicvaluechanged", (e) => {
         log("Notification: " + showMode(e.target.value));
       });
-      await modeChar.startNotifications();
+      await gattOp(() => modeChar.startNotifications());
 
       setStatus("Connected to " + device.name, "ok");
       log("Connected, notifications on");
@@ -185,7 +296,7 @@
     if (!commandChar) return;
     toggleBtn.disabled = true;
     try {
-      await commandChar.writeValueWithResponse(Uint8Array.of(CMD_TOGGLE));
+      await gattOp(() => commandChar.writeValueWithResponse(Uint8Array.of(CMD_TOGGLE)));
       log("Toggle command sent");
     } catch (err) {
       log("Error: " + err.message);
